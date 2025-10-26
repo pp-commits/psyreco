@@ -11,16 +11,20 @@ MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
 
 def _safe_parse_json(text: str):
     """
-    Try to extract JSON from LLM text. Handles plain JSON, text + JSON, or fallback.
+    Extract JSON safely from LLM response.
+    Handles:
+      - direct JSON
+      - text containing JSON
+      - fallback to user text if JSON parsing fails
     """
     text = text.strip()
-    # direct json
+    # Direct JSON
     try:
         return json.loads(text)
     except Exception:
         pass
 
-    # try to find first { ... } block
+    # Attempt to extract first {...} block
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
@@ -29,19 +33,19 @@ def _safe_parse_json(text: str):
         except Exception:
             pass
 
-    # fallback: return as tags
+    # Fallback: treat entire text as a single interest tag
     return {"emotion": None, "mindset": None, "interest_tags": [text]}
 
 def analyze_mood_mistral(user_input: str):
     """
-    Call Mistral chat completions to extract psychological traits.
-    Returns a dict: {emotion, mindset, interest_tags}
+    Calls Mistral API to analyze psychological traits from user input.
+    Returns dict with keys: emotion, mindset, interest_tags
     """
     if not MISTRAL_API_KEY:
         raise RuntimeError("MISTRAL_API_KEY not set in environment")
 
     prompt = (
-        "Analyze the psychological state of the following user text and return a JSON ONLY.\n\n"
+        "Analyze the psychological state of the following user text and return JSON ONLY.\n\n"
         f"User text: \"{user_input}\"\n\n"
         "Return a JSON object with keys:\n"
         " - emotion: single-word primary emotion (e.g., anxiety, sadness, joy) or null\n"
@@ -49,8 +53,7 @@ def analyze_mood_mistral(user_input: str):
         " - interest_tags: an array of 3-6 short tags the user would like to read about (genres, topics, themes)\n\n"
         "Example output:\n"
         '{"emotion": "anxiety", "mindset": "career stress", "interest_tags": ["mindfulness", "career clarity", "self-help"]}\n\n'
-        'Do not include any extra commentary—output JSON only.'
-
+        "Do not include any extra commentary—JSON ONLY."
     )
 
     headers = {
@@ -67,23 +70,20 @@ def analyze_mood_mistral(user_input: str):
         "max_tokens": 200
     }
 
-    res = requests.post(MISTRAL_URL, headers=headers, json=payload, timeout=30)
-    if res.status_code != 200:
-        # surface the error for debugging
-        raise RuntimeError(f"Mistral API error {res.status_code}: {res.text}")
+    try:
+        res = requests.post(MISTRAL_URL, headers=headers, json=payload, timeout=30)
+        res.raise_for_status()
+    except requests.RequestException as e:
+        # Return fallback with user_input as interest_tag
+        return {"emotion": None, "mindset": None, "interest_tags": [user_input]}
 
     data = res.json()
-    try:
-        content = data["choices"][0]["message"]["content"]
-    except Exception as e:
-        # fallback
-        content = res.text
-
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
     parsed = _safe_parse_json(content)
 
-    # ensure fields exist
+    # Ensure required fields exist
     return {
-        "emotion": parsed.get("emotion") if parsed.get("emotion") else None,
-        "mindset": parsed.get("mindset") if parsed.get("mindset") else None,
-        "interest_tags": parsed.get("interest_tags") if parsed.get("interest_tags") else [user_input]
+        "emotion": parsed.get("emotion") or None,
+        "mindset": parsed.get("mindset") or None,
+        "interest_tags": parsed.get("interest_tags") or [user_input]
     }
